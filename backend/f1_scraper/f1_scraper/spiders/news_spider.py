@@ -1,86 +1,110 @@
 import scrapy
+import sqlite3
+from datetime import datetime
 import spacy
-from f1_scraper.items import F1NewsItem
-from scrapy.spiders import CrawlSpider, Rule
-from scrapy.linkextractors import LinkExtractor
+import pytextrank
+from scrapy_playwright.page import PageMethod
 
-class NewsSpider(CrawlSpider):
-    name = 'news_spider'
-    
-    # The curated list of top F1 news sources
-    start_urls = [
-        'https://www.formula1.com/en/latest',
-        'https://www.motorsport.com/f1/news/',
-        'https://www.autosport.com/f1/',
-        'https://www.racefans.net/category/f1/',
-        'https://the-race.com/formula-1/',
-        'https://joesaward.wordpress.com/',
-        'https://www.racingnews365.com/f1-news'
-    ]
+class NewsSpider(scrapy.Spider):
+    name = 'f1_news'
 
-    # Rules to follow links. We only want to parse article pages.
-    # This requires analyzing each site's URL structure.
-    rules = (
-        Rule(LinkExtractor(allow=r'\/news\/|\/article\/|\d{4}\/\d{2}\/\d{2}\/'), callback='parse_article', follow=True),
-    )
+    custom_settings = {
+        'PLAYWRIGHT_LAUNCH_OPTIONS': {
+            'headless': True,
+            'timeout': 90 * 1000  # Increased to 90 seconds for safety
+        },
+        'DOWNLOAD_HANDLERS': {
+            "http": "scrapy_playwright.handler.ScrapyPlaywrightDownloadHandler",
+            "https": "scrapy_playwright.handler.ScrapyPlaywrightDownloadHandler",
+        },
+        'TWISTED_REACTOR': "twisted.internet.asyncioreactor.AsyncioSelectorReactor",
+    }
 
     def __init__(self, *args, **kwargs):
         super(NewsSpider, self).__init__(*args, **kwargs)
-        # Load the spaCy model for NLP summarization
+        # Setup spaCy for summarization
         self.nlp = spacy.load("en_core_web_sm")
-        self.nlp.add_pipe("textrank")
+        if "textrank" not in self.nlp.pipe_names:
+            self.nlp.add_pipe("textrank")
+
+        # Setup database connection
+        self.conn = sqlite3.connect('../f1_news.db')
+        self.c = self.conn.cursor()
+        self.c.execute('''
+            CREATE TABLE IF NOT EXISTS articles
+            (title TEXT, url TEXT PRIMARY KEY, summary TEXT, published_date TEXT, image_url TEXT, full_text TEXT)
+        ''')
+        self.conn.commit()
 
     def start_requests(self):
-        for url in self.start_urls:
-            # Use Playwright for sites known to be dynamic/JS-heavy
-            # A simple heuristic is used here; a more robust solution would
-            # implement the escalating strategy from the blueprint.
-            use_playwright = 'wordpress.com' not in url
-            yield scrapy.Request(
-                url,
-                meta={'playwright': use_playwright}
-            )
+        # The initial request that will be handled by Playwright
+        yield scrapy.Request(
+            url='https://www.motorsport.com/f1/news/',
+            callback=self.parse,
+            meta={'playwright': True, 'playwright_include_page': True},
+            errback=self.errback,
+        )
+
+    async def parse(self, response):
+        page = response.meta["playwright_page"]
+
+        # Try to accept the cookies, but don't fail if the button isn't there
+        try:
+            # Wait for the button to be visible, then click it.
+            await page.wait_for_selector('#onetrust-accept-btn-handler', timeout=20000)
+            await page.click('#onetrust-accept-btn-handler')
+            self.log("SUCCESS: Cookie consent button clicked.")
+        except Exception:
+            self.log("INFO: Cookie consent button not found or timed out, proceeding anyway.")
+
+        # Wait for the main content grid to be loaded
+        try:
+            await page.wait_for_selector('div.ms-grid-hor-items', timeout=20000)
+            self.log("SUCCESS: Article grid found.")
+        except Exception as e:
+            self.log(f"ERROR: Could not find article grid. Page might have changed. Error: {e}")
+            await page.close()
+            return # Stop if we can't find the articles
+
+        # Get the fully rendered HTML after all actions
+        html_content = await page.content()
+        await page.close()
+
+        # Use Scrapy's Selector on the final HTML
+        selector = scrapy.Selector(text=html_content)
+        article_links = selector.css('a[data-type="post_item"]::attr(href)').getall()
+        self.log(f"Found {len(article_links)} article links. Following them now.")
+
+        for link in article_links:
+            full_url = response.urljoin(link)
+            # Use standard Scrapy requests for individual articles as they are simpler
+            yield scrapy.Request(full_url, callback=self.parse_article)
 
     def parse_article(self, response):
-        """This function parses the individual article pages."""
-        item = F1NewsItem()
+        title = response.css('h1.ms-article-title::text').get()
+        paragraphs = response.css('.ms-article-content p::text').getall()
+        article_text = ' '.join(p.strip() for p in paragraphs if p.strip())
+        image_url = response.css('div.ms-photo-main-container img::attr(src)').get()
 
-        # --- Intelligent Image Extraction ---
-        # Heuristic: Prioritize Open Graph/Twitter metadata tags for the main image
-        og_image = response.xpath('//meta[@property="og:image"]/@content').get()
-        twitter_image = response.xpath('//meta[@name="twitter:image"]/@content').get()
-        
-        image_url = og_image or twitter_image
-        if not image_url:
-            # Fallback: find the first prominent image in the main content area
-            image_url = response.css('article img::attr(src)').get() or response.css('main img::attr(src)').get()
+        if title and article_text:
+            doc = self.nlp(article_text)
+            summary = ' '.join([sent.text for sent in doc._.textrank.summary(limit_phrases=4, limit_sents=4)])
+            published_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # --- Content Extraction ---
-        headline = response.css('h1::text').get('').strip()
-        if not headline:
-            headline = response.xpath('//meta[@property="og:title"]/@content').get('').strip()
+            try:
+                self.c.execute("INSERT OR IGNORE INTO articles (title, url, summary, published_date, image_url, full_text) VALUES (?, ?, ?, ?, ?, ?)",
+                               (title.strip(), response.url, summary, published_date, image_url, article_text))
+                self.conn.commit()
+                self.log(f'SUCCESS: Saved article - {title.strip()}')
+            except sqlite3.Error as e:
+                self.log(f"DATABASE ERROR: {e}")
 
-        # Extract all text from the main article body for summarization
-        # This selector is generic and would need to be refined for each site
-        paragraphs = response.css('article p::text,.article-body p::text').getall()
-        full_text = ' '.join(p.strip() for p in paragraphs if p.strip())
+    async def errback(self, failure):
+        self.log(f"ERROR: Playwright request failed: {repr(failure)}")
+        if "playwright_page" in failure.request.meta:
+            page = failure.request.meta["playwright_page"]
+            await page.close()
 
-        if not headline or not full_text:
-            # If we can't find a headline or text, it's probably not a valid article page
-            return
-
-        # --- NLP Text Summarization ---
-        # Use spaCy with pytextrank for extractive summarization
-        doc = self.nlp(full_text)
-        # Get the top 2-3 sentences for the summary
-        summary_sentences = [sent.text for sent in doc._.textrank.summary(limit_sentences=3)]
-        summary = ' '.join(summary_sentences)
-
-        # --- Load Data into Item ---
-        item['headline'] = headline
-        item['summary'] = summary if summary else full_text[:250] + '...' # Fallback summary
-        item['image_url'] = response.urljoin(image_url) if image_url else None
-        item['source_url'] = response.url
-        item['full_text'] = full_text
-
-        yield item
+    def close(self, reason):
+        if self.conn:
+            self.conn.close()

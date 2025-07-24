@@ -33,6 +33,27 @@ DOWNLOAD_DELAY = 3
 CONCURRENT_REQUESTS_PER_DOMAIN = 2
 
 # --- Pipeline Configuration ---
-ITEM_PIPELINES = {
-   'f1_scraper.pipelines.F1NewsPipeline': 300,
+# ITEM_PIPELINES = {
+#    'f1_scraper.pipelines.F1NewsPipeline': 300,
+# }
+
+# Enable Playwright downloader
+# DOWNLOAD_HANDLERS = {
+#     "http": "scrapy_playwright.handler.ScrapyPlaywrightDownloadHandler",
+#     "https": "scrapy_playwright.handler.ScrapyPlaywrightDownloadHandler",
+# }
+
+# # Set the reactor for asyncio compatibility
+# TWISTED_REACTOR = "twisted.internet.asyncioreactor.AsyncioSelectorReactor"
+
+# # Increase the timeout for slow-loading pages
+# PLAYWRIGHT_DEFAULT_NAVIGATION_TIMEOUT = 60 * 1000  # 60 seconds
+
+# Enable Playwright downloader
+DOWNLOAD_HANDLERS = {
+    "http": "scrapy_playwright.handler.ScrapyPlaywrightDownloadHandler",
+    "https": "scrapy_playwright.handler.ScrapyPlaywrightDownloadHandler",
 }
+
+# Set the reactor for asyncio compatibility
+TWISTED_REACTOR = "twisted.internet.asyncioreactor.AsyncioSelectorReactor"
