@@ -4,7 +4,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const resultsContainer = document.getElementById('results-container');
 
     // IMPORTANT: Replace this with your actual deployed Heroku API URL
-    const API_BASE_URL = 'https://your-heroku-app-name.herokuapp.com';
+    const API_BASE_URL = 'http://127.0.0.1:5000';
 
     searchForm.addEventListener('submit', async (e) => {
         e.preventDefault();

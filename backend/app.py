@@ -18,7 +18,7 @@ def get_db_connection():
     conn.row_factory = sqlite3.Row # This allows accessing columns by name
     return conn
 
-@app.route('/api/search', methods=)
+@app.route('/api/search', methods=['GET'])
 def search_articles():
     """
     API endpoint to search for articles in the database.

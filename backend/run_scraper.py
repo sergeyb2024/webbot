@@ -20,7 +20,7 @@ def run_scraper_periodically(interval_seconds=900):
     """
     # **THIS IS THE CORRECTED LINE**
     # It correctly sets a key in the os.environ dictionary.
-    os.environ = 'f1_scraper.f1_scraper.settings'
+    os.environ['SCRAPY_SETTINGS_MODULE'] = 'f1_scraper.f1_scraper.settings'
     
     # Get Scrapy project settings. It will use the environment variable we just set.
     settings = get_project_settings()
